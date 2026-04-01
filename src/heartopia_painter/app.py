@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 import os
 import threading
 from dataclasses import dataclass
@@ -783,17 +782,10 @@ class MainWindow(QtWidgets.QMainWindow):
         threshold = max(200, min(255, threshold))
 
         with mss.mss() as sct:
-            # monitor[0] is virtual desktop bounds in native coordinates.
-            vmon = sct.monitors[0]
-            expand = max(40, int(max(sw, sh) * 0.5))
-
-            cap_left = max(int(vmon["left"]), sx - expand)
-            cap_top = max(int(vmon["top"]), sy - expand)
-            cap_right = min(int(vmon["left"] + vmon["width"]), sx + sw + expand)
-            cap_bottom = min(int(vmon["top"] + vmon["height"]), sy + sh + expand)
-
-            cap_w = max(1, cap_right - cap_left)
-            cap_h = max(1, cap_bottom - cap_top)
+            cap_left = sx
+            cap_top = sy
+            cap_w = sw
+            cap_h = sh
             img = sct.grab({"left": cap_left, "top": cap_top, "width": cap_w, "height": cap_h})
 
         rgb = bytes(getattr(img, "rgb", b""))
@@ -809,74 +801,32 @@ class MainWindow(QtWidgets.QMainWindow):
             b = rgb[i + 2]
             return r >= threshold and g >= threshold and b >= threshold
 
-        seed_x = max(0, min(cap_w - 1, (sx + sw // 2) - cap_left))
-        seed_y = max(0, min(cap_h - 1, (sy + sh // 2) - cap_top))
+        found_any = False
+        min_x = cap_w
+        min_y = cap_h
+        max_x = -1
+        max_y = -1
 
-        if not is_white(seed_x, seed_y):
-            found = None
-            max_r = max(20, int(max(sw, sh) * 0.4))
-            for r in range(1, max_r + 1):
-                for yy in range(max(0, seed_y - r), min(cap_h, seed_y + r + 1)):
-                    x1 = max(0, seed_x - r)
-                    x2 = min(cap_w - 1, seed_x + r)
-                    if is_white(x1, yy):
-                        found = (x1, yy)
-                        break
-                    if is_white(x2, yy):
-                        found = (x2, yy)
-                        break
-                if found is not None:
-                    break
-                for xx in range(max(0, seed_x - r), min(cap_w, seed_x + r + 1)):
-                    y1 = max(0, seed_y - r)
-                    y2 = min(cap_h - 1, seed_y + r)
-                    if is_white(xx, y1):
-                        found = (xx, y1)
-                        break
-                    if is_white(xx, y2):
-                        found = (xx, y2)
-                        break
-                if found is not None:
-                    break
-            if found is None:
-                return None
-            seed_x, seed_y = found
+        for y in range(cap_h):
+            row_offset = y * cap_w * 3
+            for x in range(cap_w):
+                i = row_offset + (x * 3)
+                r = rgb[i]
+                g = rgb[i + 1]
+                b = rgb[i + 2]
+                if r >= threshold and g >= threshold and b >= threshold:
+                    found_any = True
+                    if x < min_x:
+                        min_x = x
+                    if y < min_y:
+                        min_y = y
+                    if x > max_x:
+                        max_x = x
+                    if y > max_y:
+                        max_y = y
 
-        q = deque()
-        q.append((seed_x, seed_y))
-        visited = bytearray(cap_w * cap_h)
-
-        min_x = seed_x
-        min_y = seed_y
-        max_x = seed_x
-        max_y = seed_y
-
-        while q:
-            x, y = q.popleft()
-            idx = y * cap_w + x
-            if visited[idx]:
-                continue
-            visited[idx] = 1
-            if not is_white(x, y):
-                continue
-
-            if x < min_x:
-                min_x = x
-            if y < min_y:
-                min_y = y
-            if x > max_x:
-                max_x = x
-            if y > max_y:
-                max_y = y
-
-            if x > 0:
-                q.append((x - 1, y))
-            if x + 1 < cap_w:
-                q.append((x + 1, y))
-            if y > 0:
-                q.append((x, y - 1))
-            if y + 1 < cap_h:
-                q.append((x, y + 1))
+        if not found_any:
+            return None
 
         out_x = cap_left + min_x
         out_y = cap_top + min_y
