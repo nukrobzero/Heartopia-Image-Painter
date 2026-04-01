@@ -454,6 +454,97 @@ class MarkersOverlay(QtWidgets.QWidget):
             painter.drawText(box.adjusted(pad, 0, -pad, 0), QtCore.Qt.AlignmentFlag.AlignVCenter, label)
 
 
+class LockedRectOverlay(QtWidgets.QWidget):
+    """Fullscreen click-through overlay that keeps a highlighted rectangle visible."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool
+            | QtCore.Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+
+        geom = QtCore.QRect()
+        for screen in QtWidgets.QApplication.screens():
+            geom = geom.united(screen.geometry())
+        self.setGeometry(geom)
+        self._global_origin = geom.topLeft()
+
+        self._native_rect: Optional[Tuple[int, int, int, int]] = None
+
+    def start(self, native_rect: Tuple[int, int, int, int]) -> None:
+        self._native_rect = (
+            int(native_rect[0]),
+            int(native_rect[1]),
+            int(native_rect[2]),
+            int(native_rect[3]),
+        )
+        self.show()
+        self.raise_()
+        self._apply_platform_clickthrough()
+        self.update()
+
+    def stop(self) -> None:
+        self.hide()
+
+    def _apply_platform_clickthrough(self) -> None:
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+
+            GWL_EXSTYLE = -20
+            WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_NOACTIVATE = 0x08000000
+
+            user32 = ctypes.windll.user32
+            hwnd = int(self.winId())
+            if hwnd == 0:
+                return
+
+            get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+            set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+            ex = int(get_long(hwnd, GWL_EXSTYLE))
+            ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE
+            set_long(hwnd, GWL_EXSTYLE, ex)
+        except Exception:
+            pass
+
+    def paintEvent(self, _event: QtGui.QPaintEvent):
+        if self._native_rect is None:
+            return
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        x, y, w, h = self._native_rect
+        logical = native_rect_tuple_to_logical((x, y, x + w, y + h))
+        origin_f = QtCore.QPointF(self._global_origin)
+        local_rect = logical.translated(-origin_f.x(), -origin_f.y())
+
+        pen = QtGui.QPen(QtGui.QColor(0, 220, 255, 245))
+        pen.setWidth(3)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(local_rect, 6, 6)
+
+        label_box = QtCore.QRectF(local_rect.left(), max(10.0, local_rect.top() - 28.0), 260.0, 24.0)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor(0, 0, 0, 170))
+        painter.drawRoundedRect(label_box, 6, 6)
+        painter.setPen(QtGui.QColor(255, 255, 255, 235))
+        painter.drawText(label_box.adjusted(8, 0, -8, 0), QtCore.Qt.AlignmentFlag.AlignVCenter, "Locked auto-detected canvas")
+
+
 class StatusOverlay(QtWidgets.QWidget):
     # Small, click-through overlay for live painting status.
     # Not fullscreen to avoid spanning monitors.

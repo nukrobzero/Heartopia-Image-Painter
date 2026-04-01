@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import os
 import threading
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .screen import get_screen_pixel_rgb
 from .config import AppConfig, MainColor, ShadeButton, default_config_path, load_config, save_config
 from .image_processing import PixelGrid, load_and_resize_to_grid
-from .overlay import Marker, MarkersOverlay, PointResult, PointSelectOverlay, RectResult, RectSelectOverlay, StatusOverlay
+from .overlay import LockedRectOverlay, Marker, MarkersOverlay, PointResult, PointSelectOverlay, RectResult, RectSelectOverlay, StatusOverlay
 from .paint import PainterOptions, erase_canvas, paint_grid
 
 
@@ -111,6 +112,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._canvas_rect: Optional[Tuple[int, int, int, int]] = None
 
         self._overlay: Optional[RectSelectOverlay] = None
+        self._locked_canvas_overlay: Optional[LockedRectOverlay] = None
+        self._autodetect_base_rect: Optional[Tuple[int, int, int, int]] = None
 
         self._markers_overlay: Optional[MarkersOverlay] = None
 
@@ -300,11 +303,35 @@ class MainWindow(QtWidgets.QMainWindow):
         row2.addWidget(self.cbo_part)
 
         self.btn_select_canvas = QtWidgets.QPushButton("Select canvas area…")
+        self.btn_select_canvas_auto = QtWidgets.QPushButton("Select + Auto-detect white canvas…")
         row2.addWidget(self.btn_select_canvas)
+        row2.addWidget(self.btn_select_canvas_auto)
         tab_main_layout.addLayout(row2)
 
         self.lbl_canvas = QtWidgets.QLabel("Canvas: not selected")
         tab_main_layout.addWidget(self.lbl_canvas)
+
+        row2b = QtWidgets.QHBoxLayout()
+        row2b.addWidget(QtWidgets.QLabel("Auto-detect padding (px):"))
+        self.spin_pad_left = QtWidgets.QSpinBox()
+        self.spin_pad_left.setRange(-500, 500)
+        self.spin_pad_left.setPrefix("L ")
+        self.spin_pad_top = QtWidgets.QSpinBox()
+        self.spin_pad_top.setRange(-500, 500)
+        self.spin_pad_top.setPrefix("T ")
+        self.spin_pad_right = QtWidgets.QSpinBox()
+        self.spin_pad_right.setRange(-500, 500)
+        self.spin_pad_right.setPrefix("R ")
+        self.spin_pad_bottom = QtWidgets.QSpinBox()
+        self.spin_pad_bottom.setRange(-500, 500)
+        self.spin_pad_bottom.setPrefix("B ")
+        self.btn_toggle_locked_canvas = QtWidgets.QPushButton("Hide locked frame")
+        row2b.addWidget(self.spin_pad_left)
+        row2b.addWidget(self.spin_pad_top)
+        row2b.addWidget(self.spin_pad_right)
+        row2b.addWidget(self.spin_pad_bottom)
+        row2b.addWidget(self.btn_toggle_locked_canvas)
+        tab_main_layout.addLayout(row2b)
 
         self.lbl_global_buttons = QtWidgets.QLabel("Palette buttons: not set")
         self.lbl_global_buttons.setWordWrap(True)
@@ -499,6 +526,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Wiring
         self.btn_load.clicked.connect(self._on_load)
         self.btn_select_canvas.clicked.connect(self._on_select_canvas)
+        self.btn_select_canvas_auto.clicked.connect(self._on_select_canvas_autodetect)
         self.btn_set_shades_button.clicked.connect(lambda: self._capture_global_button("shades"))
         self.btn_set_back_button.clicked.connect(lambda: self._capture_global_button("back"))
         self.btn_show_main_overlay.clicked.connect(self._on_toggle_main_color_overlay)
@@ -543,6 +571,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_verify_auto_recover.stateChanged.connect(lambda _v: self._on_verify_changed())
 
         self.chk_status_overlay.stateChanged.connect(lambda _v: self._on_status_overlay_changed())
+        self.spin_pad_left.valueChanged.connect(lambda _v: self._on_canvas_padding_changed())
+        self.spin_pad_top.valueChanged.connect(lambda _v: self._on_canvas_padding_changed())
+        self.spin_pad_right.valueChanged.connect(lambda _v: self._on_canvas_padding_changed())
+        self.spin_pad_bottom.valueChanged.connect(lambda _v: self._on_canvas_padding_changed())
+        self.btn_toggle_locked_canvas.clicked.connect(self._on_toggle_locked_canvas)
 
     def _on_status_overlay_changed(self) -> None:
         self._cfg.status_overlay_enabled = bool(self.chk_status_overlay.isChecked())
@@ -621,8 +654,237 @@ class MainWindow(QtWidgets.QMainWindow):
         # Restore timing controls
         self._sync_timing_ui_from_cfg()
 
+        # Restore auto-detect padding controls
+        self._sync_canvas_autodetect_ui_from_cfg()
+
         # Restore paint mode
         self._sync_paint_mode_ui_from_cfg()
+
+    def _sync_canvas_autodetect_ui_from_cfg(self) -> None:
+        spins = [self.spin_pad_left, self.spin_pad_top, self.spin_pad_right, self.spin_pad_bottom]
+        for s in spins:
+            s.blockSignals(True)
+        try:
+            self.spin_pad_left.setValue(int(getattr(self._cfg, "canvas_autodetect_padding_left", 0)))
+            self.spin_pad_top.setValue(int(getattr(self._cfg, "canvas_autodetect_padding_top", 0)))
+            self.spin_pad_right.setValue(int(getattr(self._cfg, "canvas_autodetect_padding_right", 0)))
+            self.spin_pad_bottom.setValue(int(getattr(self._cfg, "canvas_autodetect_padding_bottom", 0)))
+        finally:
+            for s in spins:
+                s.blockSignals(False)
+
+    def _on_canvas_padding_changed(self) -> None:
+        self._cfg.canvas_autodetect_padding_left = int(self.spin_pad_left.value())
+        self._cfg.canvas_autodetect_padding_top = int(self.spin_pad_top.value())
+        self._cfg.canvas_autodetect_padding_right = int(self.spin_pad_right.value())
+        self._cfg.canvas_autodetect_padding_bottom = int(self.spin_pad_bottom.value())
+        self._save_cfg()
+
+        # If we already have an auto-detected base, update the visible frame immediately.
+        if self._autodetect_base_rect is not None:
+            padded = self._apply_canvas_padding(self._autodetect_base_rect)
+            self._set_canvas_rect(padded, show_popup=False)
+            self._show_locked_canvas_overlay(padded)
+
+    def _on_toggle_locked_canvas(self) -> None:
+        if self._locked_canvas_overlay is not None and self._locked_canvas_overlay.isVisible():
+            self._hide_locked_canvas_overlay()
+            self.btn_toggle_locked_canvas.setText("Show locked frame")
+            return
+        if self._canvas_rect is None:
+            return
+        self._show_locked_canvas_overlay(self._canvas_rect)
+        self.btn_toggle_locked_canvas.setText("Hide locked frame")
+
+    def _show_locked_canvas_overlay(self, rect: Tuple[int, int, int, int]) -> None:
+        if self._locked_canvas_overlay is None:
+            self._locked_canvas_overlay = LockedRectOverlay()
+        self._locked_canvas_overlay.start(rect)
+        self.btn_toggle_locked_canvas.setText("Hide locked frame")
+
+    def _hide_locked_canvas_overlay(self) -> None:
+        try:
+            if self._locked_canvas_overlay is not None:
+                self._locked_canvas_overlay.stop()
+        except Exception:
+            pass
+
+    def _apply_canvas_padding(self, rect: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+        x, y, w, h = (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
+        pl = int(getattr(self._cfg, "canvas_autodetect_padding_left", 0))
+        pt = int(getattr(self._cfg, "canvas_autodetect_padding_top", 0))
+        pr = int(getattr(self._cfg, "canvas_autodetect_padding_right", 0))
+        pb = int(getattr(self._cfg, "canvas_autodetect_padding_bottom", 0))
+
+        nx = x - pl
+        ny = y - pt
+        nw = w + pl + pr
+        nh = h + pt + pb
+
+        if nw < 4:
+            nw = 4
+        if nh < 4:
+            nh = 4
+        return (int(nx), int(ny), int(nw), int(nh))
+
+    def _set_canvas_rect(self, rect: Tuple[int, int, int, int], show_popup: bool = True) -> None:
+        self._canvas_rect = (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
+
+        sel_key = self._current_selection_key()
+        self._cfg.last_canvas_rect_by_key[sel_key] = self._canvas_rect
+        self._cfg.last_canvas_rect = self._canvas_rect
+        self._save_cfg()
+        self._refresh_config_view()
+
+        if show_popup:
+            x, y, w, h = self._canvas_rect
+            QtWidgets.QMessageBox.information(
+                self,
+                "Canvas selected",
+                f"Canvas area saved.\n\nPosition: ({x}, {y})\nSize: {w}x{h}",
+            )
+
+    def _build_preview_pixmap(self) -> Optional[QtGui.QPixmap]:
+        if self._loaded is None:
+            return None
+        grid = self._loaded.grid
+        qimg = QtGui.QImage(grid.w, grid.h, QtGui.QImage.Format.Format_RGB888)
+        for y in range(grid.h):
+            for x in range(grid.w):
+                r, g, b = grid.get(x, y)
+                qimg.setPixel(x, y, QtGui.qRgb(r, g, b))
+        return QtGui.QPixmap.fromImage(qimg)
+
+    def _start_canvas_selection(self, autodetect: bool) -> None:
+        if self._loaded is None:
+            QtWidgets.QMessageBox.information(self, "Select image", "Import an image first.")
+            return
+
+        pix = self._build_preview_pixmap()
+        self._overlay = RectSelectOverlay(preview_pixmap=pix)
+        if autodetect:
+            self._overlay.rectSelected.connect(self._on_canvas_rect_selected_autodetect)
+        else:
+            self._overlay.rectSelected.connect(self._on_canvas_rect_selected)
+        self._overlay.cancelled.connect(lambda: None)
+        self._overlay.start()
+
+    def _autodetect_white_canvas_rect(self, seed_rect: Tuple[int, int, int, int]) -> Optional[Tuple[int, int, int, int]]:
+        try:
+            import mss
+        except Exception:
+            return None
+
+        sx, sy, sw, sh = (int(seed_rect[0]), int(seed_rect[1]), int(seed_rect[2]), int(seed_rect[3]))
+        if sw <= 0 or sh <= 0:
+            return None
+
+        threshold = int(getattr(self._cfg, "canvas_autodetect_white_threshold", 245))
+        threshold = max(200, min(255, threshold))
+
+        with mss.mss() as sct:
+            # monitor[0] is virtual desktop bounds in native coordinates.
+            vmon = sct.monitors[0]
+            expand = max(40, int(max(sw, sh) * 0.5))
+
+            cap_left = max(int(vmon["left"]), sx - expand)
+            cap_top = max(int(vmon["top"]), sy - expand)
+            cap_right = min(int(vmon["left"] + vmon["width"]), sx + sw + expand)
+            cap_bottom = min(int(vmon["top"] + vmon["height"]), sy + sh + expand)
+
+            cap_w = max(1, cap_right - cap_left)
+            cap_h = max(1, cap_bottom - cap_top)
+            img = sct.grab({"left": cap_left, "top": cap_top, "width": cap_w, "height": cap_h})
+
+        rgb = bytes(getattr(img, "rgb", b""))
+        if not rgb or len(rgb) < (cap_w * cap_h * 3):
+            return None
+
+        def is_white(ix: int, iy: int) -> bool:
+            if ix < 0 or iy < 0 or ix >= cap_w or iy >= cap_h:
+                return False
+            i = (iy * cap_w + ix) * 3
+            r = rgb[i]
+            g = rgb[i + 1]
+            b = rgb[i + 2]
+            return r >= threshold and g >= threshold and b >= threshold
+
+        seed_x = max(0, min(cap_w - 1, (sx + sw // 2) - cap_left))
+        seed_y = max(0, min(cap_h - 1, (sy + sh // 2) - cap_top))
+
+        if not is_white(seed_x, seed_y):
+            found = None
+            max_r = max(20, int(max(sw, sh) * 0.4))
+            for r in range(1, max_r + 1):
+                for yy in range(max(0, seed_y - r), min(cap_h, seed_y + r + 1)):
+                    x1 = max(0, seed_x - r)
+                    x2 = min(cap_w - 1, seed_x + r)
+                    if is_white(x1, yy):
+                        found = (x1, yy)
+                        break
+                    if is_white(x2, yy):
+                        found = (x2, yy)
+                        break
+                if found is not None:
+                    break
+                for xx in range(max(0, seed_x - r), min(cap_w, seed_x + r + 1)):
+                    y1 = max(0, seed_y - r)
+                    y2 = min(cap_h - 1, seed_y + r)
+                    if is_white(xx, y1):
+                        found = (xx, y1)
+                        break
+                    if is_white(xx, y2):
+                        found = (xx, y2)
+                        break
+                if found is not None:
+                    break
+            if found is None:
+                return None
+            seed_x, seed_y = found
+
+        q = deque()
+        q.append((seed_x, seed_y))
+        visited = bytearray(cap_w * cap_h)
+
+        min_x = seed_x
+        min_y = seed_y
+        max_x = seed_x
+        max_y = seed_y
+
+        while q:
+            x, y = q.popleft()
+            idx = y * cap_w + x
+            if visited[idx]:
+                continue
+            visited[idx] = 1
+            if not is_white(x, y):
+                continue
+
+            if x < min_x:
+                min_x = x
+            if y < min_y:
+                min_y = y
+            if x > max_x:
+                max_x = x
+            if y > max_y:
+                max_y = y
+
+            if x > 0:
+                q.append((x - 1, y))
+            if x + 1 < cap_w:
+                q.append((x + 1, y))
+            if y > 0:
+                q.append((x, y - 1))
+            if y + 1 < cap_h:
+                q.append((x, y + 1))
+
+        out_x = cap_left + min_x
+        out_y = cap_top + min_y
+        out_w = (max_x - min_x + 1)
+        out_h = (max_y - min_y + 1)
+        if out_w < 6 or out_h < 6:
+            return None
+        return (int(out_x), int(out_y), int(out_w), int(out_h))
 
     def _sync_paint_mode_ui_from_cfg(self) -> None:
         # Block signals so we don't save during startup.
@@ -951,38 +1213,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_cfg()
 
     def _on_select_canvas(self):
-        if self._loaded is None:
-            QtWidgets.QMessageBox.information(self, "Select image", "Import an image first.")
-            return
+        self._autodetect_base_rect = None
+        self._hide_locked_canvas_overlay()
+        self._start_canvas_selection(autodetect=False)
 
-        # Build preview pixmap from the resized grid (matches the preset exactly)
-        grid = self._loaded.grid
-        qimg = QtGui.QImage(grid.w, grid.h, QtGui.QImage.Format.Format_RGB888)
-        for y in range(grid.h):
-            for x in range(grid.w):
-                r, g, b = grid.get(x, y)
-                qimg.setPixel(x, y, QtGui.qRgb(r, g, b))
-        pix = QtGui.QPixmap.fromImage(qimg)
-
-        self._overlay = RectSelectOverlay(preview_pixmap=pix)
-        self._overlay.rectSelected.connect(self._on_canvas_rect_selected)
-        self._overlay.cancelled.connect(lambda: None)
-        self._overlay.start()
+    def _on_select_canvas_autodetect(self):
+        self._start_canvas_selection(autodetect=True)
 
     def _on_canvas_rect_selected(self, r: RectResult):
-        # Use selection as canvas rect (we'll refine snapping later)
-        self._canvas_rect = (r.x, r.y, r.w, r.h)
+        self._autodetect_base_rect = None
+        self._hide_locked_canvas_overlay()
+        self._set_canvas_rect((r.x, r.y, r.w, r.h), show_popup=True)
 
-        sel_key = self._current_selection_key()
-        self._cfg.last_canvas_rect_by_key[sel_key] = self._canvas_rect
-        self._cfg.last_canvas_rect = self._canvas_rect
-        self._save_cfg()
-        self._refresh_config_view()
+    def _on_canvas_rect_selected_autodetect(self, r: RectResult):
+        picked = (int(r.x), int(r.y), int(r.w), int(r.h))
+        detected = self._autodetect_white_canvas_rect(picked)
+        if detected is None:
+            self._autodetect_base_rect = None
+            self._hide_locked_canvas_overlay()
+            self._set_canvas_rect(picked, show_popup=True)
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Auto-detect",
+                "Auto-detect white background failed, so the original selected rectangle was kept.",
+            )
+            return
+
+        self._autodetect_base_rect = detected
+        padded = self._apply_canvas_padding(detected)
+        self._set_canvas_rect(padded, show_popup=False)
+        self._show_locked_canvas_overlay(padded)
 
         QtWidgets.QMessageBox.information(
             self,
-            "Canvas selected",
-            f"Canvas area saved.\n\nPosition: ({r.x}, {r.y})\nSize: {r.w}x{r.h}",
+            "Auto-detect complete",
+            "Canvas auto-detected from white background and locked on screen.\n\n"
+            f"Detected: x={detected[0]}, y={detected[1]}, w={detected[2]}, h={detected[3]}\n"
+            f"Applied padding: L={self._cfg.canvas_autodetect_padding_left}, "
+            f"T={self._cfg.canvas_autodetect_padding_top}, "
+            f"R={self._cfg.canvas_autodetect_padding_right}, "
+            f"B={self._cfg.canvas_autodetect_padding_bottom}\n"
+            f"Final: x={padded[0]}, y={padded[1]}, w={padded[2]}, h={padded[3]}",
         )
 
     def _capture_global_button(self, which: str):

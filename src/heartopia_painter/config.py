@@ -57,6 +57,14 @@ class AppConfig:
     # For T-Shirt preset
     tshirt_part: str = "Front"
 
+    # Canvas auto-detect tuning
+    # Positive padding expands outward; negative padding shrinks inward.
+    canvas_autodetect_padding_left: int = 0
+    canvas_autodetect_padding_top: int = 0
+    canvas_autodetect_padding_right: int = 0
+    canvas_autodetect_padding_bottom: int = 0
+    canvas_autodetect_white_threshold: int = 245
+
     # Painting timing (seconds). These defaults are conservative to improve click reliability.
     move_duration_s: float = 0.03
     mouse_down_s: float = 0.02
@@ -188,6 +196,37 @@ class AppConfig:
         cfg.last_canvas_rect_by_key = to_rect_map(data.get("last_canvas_rect_by_key"))
 
         cfg.tshirt_part = str(data.get("tshirt_part", cfg.tshirt_part))
+
+        try:
+            cfg.canvas_autodetect_padding_left = int(
+                data.get("canvas_autodetect_padding_left", cfg.canvas_autodetect_padding_left)
+            )
+        except Exception:
+            pass
+        try:
+            cfg.canvas_autodetect_padding_top = int(
+                data.get("canvas_autodetect_padding_top", cfg.canvas_autodetect_padding_top)
+            )
+        except Exception:
+            pass
+        try:
+            cfg.canvas_autodetect_padding_right = int(
+                data.get("canvas_autodetect_padding_right", cfg.canvas_autodetect_padding_right)
+            )
+        except Exception:
+            pass
+        try:
+            cfg.canvas_autodetect_padding_bottom = int(
+                data.get("canvas_autodetect_padding_bottom", cfg.canvas_autodetect_padding_bottom)
+            )
+        except Exception:
+            pass
+        try:
+            cfg.canvas_autodetect_white_threshold = int(
+                data.get("canvas_autodetect_white_threshold", cfg.canvas_autodetect_white_threshold)
+            )
+        except Exception:
+            pass
 
         # Migrate older per-key naming schemes to the new keys.
         # Old: "1:1 (30x30)" -> New: "1:1::Small"
