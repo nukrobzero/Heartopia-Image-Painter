@@ -57,6 +57,9 @@ class AppConfig:
     # For T-Shirt preset
     tshirt_part: str = "Front"
 
+    # Image sharpening preset: "none", "mild", or "strong"
+    image_sharpen: str = "none"
+
     # Canvas auto-detect tuning
     # Positive padding expands outward; negative padding shrinks inward.
     canvas_autodetect_padding_left: int = 0
@@ -196,6 +199,7 @@ class AppConfig:
         cfg.last_canvas_rect_by_key = to_rect_map(data.get("last_canvas_rect_by_key"))
 
         cfg.tshirt_part = str(data.get("tshirt_part", cfg.tshirt_part))
+        cfg.image_sharpen = str(data.get("image_sharpen", cfg.image_sharpen))
 
         try:
             cfg.canvas_autodetect_padding_left = int(

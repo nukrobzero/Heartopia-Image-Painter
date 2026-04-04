@@ -310,6 +310,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_canvas = QtWidgets.QLabel("Canvas: not selected")
         tab_main_layout.addWidget(self.lbl_canvas)
 
+        # Image sharpening
+        row_sharpen = QtWidgets.QHBoxLayout()
+        row_sharpen.addWidget(QtWidgets.QLabel("Image sharpening:"))
+        self.cbo_sharpen = QtWidgets.QComboBox()
+        self.cbo_sharpen.addItems(["None", "Mild", "Strong"])
+        row_sharpen.addWidget(self.cbo_sharpen)
+        row_sharpen.addStretch()
+        tab_main_layout.addLayout(row_sharpen)
+
         row2b = QtWidgets.QHBoxLayout()
         row2b.addWidget(QtWidgets.QLabel("Auto-detect padding (px):"))
         self.spin_pad_left = QtWidgets.QSpinBox()
@@ -544,6 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cbo_preset.currentTextChanged.connect(self._on_preset_changed)
         self.cbo_precision.currentTextChanged.connect(self._on_precision_changed)
         self.cbo_part.currentTextChanged.connect(self._on_part_changed)
+        self.cbo_sharpen.currentTextChanged.connect(self._on_sharpen_changed)
 
         self.cbo_paint_mode.currentTextChanged.connect(self._on_paint_mode_changed)
 
@@ -644,6 +654,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Restore T-Shirt part
         if self._cfg.tshirt_part and self.cbo_part.findText(self._cfg.tshirt_part) >= 0:
             self.cbo_part.setCurrentText(self._cfg.tshirt_part)
+
+        # Restore image sharpening
+        sharpen_val = getattr(self._cfg, "image_sharpen", "none").capitalize()
+        if self.cbo_sharpen.findText(sharpen_val) >= 0:
+            self.cbo_sharpen.setCurrentText(sharpen_val)
 
         self._update_variant_ui_visibility()
 
@@ -1103,7 +1118,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if p.exists():
                 try:
                     w, h = self._selected_preset_wh()
-                    grid = load_and_resize_to_grid(str(p), w=w, h=h)
+                    grid = load_and_resize_to_grid(str(p), w=w, h=h, sharpen=self._cfg.image_sharpen)
                     self._loaded = LoadedImage(path=str(p), grid=grid)
                     self.lbl_image.setText(f"Loaded: {p} ({w}x{h})")
                 except Exception:
@@ -1128,7 +1143,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            grid = load_and_resize_to_grid(path, w=w, h=h)
+            grid = load_and_resize_to_grid(path, w=w, h=h, sharpen=self._cfg.image_sharpen)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import failed", str(e))
             return
@@ -1292,6 +1307,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cfg.tshirt_part = self.cbo_part.currentText() or self._cfg.tshirt_part
         self._save_cfg()
         self._restore_selection_state()
+
+    def _on_sharpen_changed(self, text: str):
+        self._cfg.image_sharpen = text.lower()
+        self._save_cfg()
 
     def _on_setup_new_color(self):
         name, ok = QtWidgets.QInputDialog.getText(self, "New color", "Color name:")
